@@ -1,0 +1,17 @@
+.env*
+.medusa
+dist/
+node_modules/
+tmp/
+credentials/
+.vscode
+docker-compose.yml
+bitbucket-pipelines.yml
+Dockerfile
+
+.git
+.gitignore
+
+tsconfig.dev.json
+storage.rules
+scripts/

@@ -1,0 +1,170 @@
+image: google/cloud-sdk
+
+definitions:
+  services:
+    docker-with-more-memory:
+      memory: 3072
+      type: docker
+  caches:
+    nodecustom:
+      key:
+        files:
+          - yarn.lock
+      path: ./node_modules
+    yarn: /usr/local/share/.cache/yarn
+  steps:
+    - step: &upload_sourcemaps
+        name: Upload sourcemaps
+        image: getsentry/sentry-cli:2.32.1
+        script:
+          - sentry-cli sourcemaps inject --org narisolutions --project qnari-commerce build_dist
+          - sentry-cli sourcemaps upload --org narisolutions --project qnari-commerce build_dist
+
+pipelines:
+  branches:
+    staging:
+      - stage:
+          name: Deploy to staging
+          deployment: staging
+          steps:
+            - step:
+                name: Deploy API to staging
+                image: google/cloud-sdk
+                services:
+                  - docker-with-more-memory
+                caches:
+                  - docker
+                artifacts:
+                  - build_dist/**
+                script:
+                  - export PATH=/usr/bin:$PATH # https://confluence.atlassian.com/bbkb/docker-buildkit-error-in-pipelines-1235859715.html
+                  - export DOCKER_BUILDKIT=1
+                  - echo ${GCP_KEY_FILE_AUTH} | base64 --decode --ignore-garbage > /tmp/gcloud-api.json
+                  - gcloud auth activate-service-account --key-file /tmp/gcloud-api.json
+                  - gcloud config set project $GCP_PROJECT_ID
+                  - gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+                  # Build and deploy API NB! MEDUSA_ADMIN_PATH might be needed if building admin ui in docker
+                  - >
+                    docker build 
+                    --cache-from europe-west1-docker.pkg.dev/$GCP_PROJECT_ID/qnari-commerce-staging/$IMAGE_NAME
+                    --tag europe-west1-docker.pkg.dev/$GCP_PROJECT_ID/qnari-commerce-staging/$IMAGE_NAME
+                    --build-arg "MEDUSA_WORKER_MODE=server"
+                    .
+                  # - docker cp $(docker create europe-west1-docker.pkg.dev/$GCP_PROJECT_ID/qnari-commerce-staging/$IMAGE_NAME):/home/node/app/dist build_dist
+                  - docker push europe-west1-docker.pkg.dev/$GCP_PROJECT_ID/qnari-commerce-staging/$IMAGE_NAME
+                  # Change the delimiter from comma (,) to @ to allow lists
+                  # TODO do we need to add medusa worker mode as build args when building?
+                  - >
+                    gcloud run deploy $SERVICE_NAME
+                    --image europe-west1-docker.pkg.dev/$GCP_PROJECT_ID/qnari-commerce-staging/$IMAGE_NAME
+                    --region europe-west1
+                    --service-account $SERVICE_ACCOUNT
+                    --allow-unauthenticated
+                    --platform managed
+                    --execution-environment gen2
+                    --memory 2Gi
+                    --set-env-vars "LOG_LEVEL=silly"
+                    --set-env-vars "PRODUCTION=False"
+                    --set-env-vars "MEDUSA_WORKER_MODE=server"
+                    --set-env-vars "MEDUSA_ADMIN_ONBOARDING_TYPE=$MEDUSA_ADMIN_ONBOARDING_TYPE"
+                    --set-env-vars "^@^STORE_CORS=$STORE_CORS"
+                    --set-env-vars "^@^ADMIN_CORS=$ADMIN_CORS"
+                    --set-env-vars "^@^AUTH_CORS=$AUTH_CORS"
+                    --set-env-vars "REDIS_URL=$REDIS_URL"
+                    --set-env-vars "JWT_SECRET=$JWT_SECRET"
+                    --set-env-vars "COOKIE_SECRET=$COOKIE_SECRET"
+                    --set-env-vars "DATABASE_URL=$DATABASE_URL"
+                    --set-env-vars "BOG_CLIENT_ID=$BOG_CLIENT_ID"
+                    --set-env-vars "BOG_CLIENT_SECRET=$BOG_CLIENT_SECRET"
+                    --set-env-vars "MEDUSA_BACKEND_URL=$MEDUSA_BACKEND_URL"
+                    --set-env-vars "MEDUSA_STOREFRONT_URL=$MEDUSA_STOREFRONT_URL"
+                    --set-env-vars "GCP_PROJECT_ID=$GCP_PROJECT_ID"
+                    --set-env-vars "SENDGRID_API_KEY=$SENDGRID_API_KEY"
+                    --set-env-vars "SENDGRID_FROM=$SENDGRID_FROM"
+                    --set-env-vars "GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID"
+                    --set-env-vars "GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET"
+            # Build and deploy admin interface
+            - step:
+                name: Deploy admin ui to firebase hosting staging
+                image: node:alpine3.20
+                script:
+                  - export MEDUSA_ADMIN_PATH=/
+                  - export DISABLE_MEDUSA_ADMIN=true
+                  - export NODE_ENV=production
+                  - yarn install --frozen-lockfile && yarn build --admin-only
+                  - pipe: atlassian/firebase-deploy:5.1.1
+                    variables:
+                      KEY_FILE: $GCP_KEY_FILE_AUTH
+                      PROJECT_ID: $GCP_PROJECT_ID
+      #      - step: *upload_sourcemaps
+  tags:
+    release-*:
+      - stage:
+          name: Deploy to production
+          deployment: production
+          steps:
+            - step:
+                name: Deploy to production
+                image: google/cloud-sdk
+                services:
+                  - docker
+                caches:
+                  - docker
+                script:
+                  - export PATH=/usr/bin:$PATH # https://confluence.atlassian.com/bbkb/docker-buildkit-error-in-pipelines-1235859715.html
+                  - export DOCKER_BUILDKIT=1
+                  - echo ${GCP_KEY_FILE_AUTH} | base64 --decode --ignore-garbage > /tmp/gcloud-api.json
+                  - gcloud auth activate-service-account --key-file /tmp/gcloud-api.json
+                  - gcloud config set project $GCP_PROJECT_ID
+                  - gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+                  # Build and deploy API
+                  - >
+                    docker build 
+                    --cache-from europe-west1-docker.pkg.dev/$GCP_PROJECT_ID/qnari-commerce/$IMAGE_NAME
+                    --tag eu.gcr.io/$GCP_PROJECT_ID/$IMAGE_NAME 
+                    .
+                  # - docker cp $(docker create europe-west1-docker.pkg.dev/$GCP_PROJECT_ID/qnari-commerce/$IMAGE_NAME):/home/node/app/dist build_dist
+                  - docker push europe-west1-docker.pkg.dev/$GCP_PROJECT_ID/qnari-commerce/$IMAGE_NAME
+                  # Change the delimiter from comma (,) to @ to allow lists
+                  - >
+                    gcloud run deploy $SERVICE_NAME
+                    --image europe-west1-docker.pkg.dev/$GCP_PROJECT_ID/qnari-commerce/$IMAGE_NAME
+                    --region europe-west1
+                    --service-account $SERVICE_ACCOUNT
+                    --allow-unauthenticated
+                    --platform managed
+                    --execution-environment gen2
+                    --memory 2Gi
+                    --set-env-vars "LOG_LEVEL=silly"
+                    --set-env-vars "PRODUCTION=True"
+                    --set-env-vars "MEDUSA_WORKER_MODE=server"
+                    --set-env-vars "MEDUSA_ADMIN_ONBOARDING_TYPE=$MEDUSA_ADMIN_ONBOARDING_TYPE"
+                    --set-env-vars "^@^STORE_CORS=$STORE_CORS"
+                    --set-env-vars "^@^ADMIN_CORS=$ADMIN_CORS"
+                    --set-env-vars "^@^AUTH_CORS=$AUTH_CORS"
+                    --set-env-vars "REDIS_URL=$REDIS_URL"
+                    --set-env-vars "JWT_SECRET=$JWT_SECRET"
+                    --set-env-vars "COOKIE_SECRET=$COOKIE_SECRET"
+                    --set-env-vars "DATABASE_URL=$DATABASE_URL"
+                    --set-env-vars "BOG_CLIENT_ID=$BOG_CLIENT_ID"
+                    --set-env-vars "BOG_CLIENT_SECRET=$BOG_CLIENT_SECRET"
+                    --set-env-vars "MEDUSA_BACKEND_URL=$MEDUSA_BACKEND_URL"
+                    --set-env-vars "MEDUSA_STOREFRONT_URL=$MEDUSA_STOREFRONT_URL"
+                    --set-env-vars "GCP_PROJECT_ID=$GCP_PROJECT_ID"
+                    --set-env-vars "GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID"
+                    --set-env-vars "GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET"
+            # Build and deploy admin interface
+            - step:
+                name: Deploy admin ui to firebase hosting to production
+                image: node:alpine3.20
+                script:
+                  - export MEDUSA_ADMIN_PATH=/
+                  - export DISABLE_MEDUSA_ADMIN=true
+                  - export NODE_ENV=production
+                  - yarn install --frozen-lockfile && yarn build --admin-only
+                  - pipe: atlassian/firebase-deploy:5.1.1
+                    variables:
+                      KEY_FILE: $GCP_KEY_FILE_AUTH
+                      PROJECT_ID: $GCP_PROJECT_ID
+
+      #      - step: *upload_sourcemaps

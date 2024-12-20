@@ -1,0 +1,21 @@
+{
+    "projects": {
+        "default": "qnari-commerce-staging"
+    },
+    "targets": {
+        "qnari-commerce-staging": {
+            "hosting": {
+                "qnari-commerce-admin": [
+                    "qnari-commerce-admin-staging"
+                ]
+            }
+        },
+        "qnari-commerce": {
+            "hosting": {
+                "qnari-commerce-admin": [
+                    "qnari-commerce-admin"
+                ]
+            }
+        }
+    }
+}
